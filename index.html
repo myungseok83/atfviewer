@@ -79,10 +79,10 @@
             </a>
             <div>
                 <h1 class="font-bold text-lg text-white tracking-wide flex items-center gap-2">
-                    ATF 스캔데이터 시뮬레이터
+                    ATF 시뮬레이터
                     
                 </h1>
-                <p class="text-xs text-slate-400">ATF / LIM Scan Data Auto-Converting Photometric Graph System</p>
+                <p class="text-xs text-slate-400">ATF Simulator</p>
             </div>
         </div>
 
@@ -95,7 +95,7 @@
                 </button>
                 <button id="tab-matrix-btn" class="px-3 py-1.5 rounded-md font-semibold text-slate-400 hover:text-white transition flex items-center gap-1.5">
                     <i class="fa-solid fa-table-cells"></i>
-                    <span>X-Y 데이터 매트릭스</span>
+                    <span>H-V 매트릭스</span>
                 </button>
             </div>
 
@@ -457,7 +457,7 @@
         </main>
 
         <!-- Right Sidebar: Photometric Regulation Verification Panel (Hidden by default) -->
-        <aside id="regulation-sidebar" class="hidden w-96 bg-slate-900 border-l border-slate-800 flex flex-col z-10 transition-all">
+        <aside id="regulation-sidebar" class="hidden w-[44rem] max-w-[90vw] bg-slate-900 border-l border-slate-800 flex flex-col z-10 transition-all">
             
             <div class="p-4 border-b border-slate-800 flex items-center justify-between">
                 <div>
@@ -503,15 +503,20 @@
                     <button id="delete-regulation-btn" class="bg-rose-900/60 hover:bg-rose-800 border border-rose-700/50 rounded px-2 py-1.5 text-[10px] text-rose-200" title="법규 삭제"><i class="fa-solid fa-trash"></i></button>
                     <button id="add-regulation-point-btn" class="bg-blue-700/70 hover:bg-blue-600 rounded px-2 py-1.5 text-[10px] text-blue-100" title="시험 포인트 추가"><i class="fa-solid fa-plus mr-1"></i>포인트</button>
                 </div>
-                <div id="regulation-library-detail" class="text-[9px] text-slate-500">시험 포인트 표에서 포인트명, H/V 위치, MIN/MAX 기준값을 직접 수정할 수 있습니다. 수정 내용은 자동 저장됩니다.</div>
+                <div id="regulation-library-detail" class="text-[9px] text-slate-500">시험 포인트 표에서 포인트명, H/V 위치, MIN/MAX 기준값을 직접 수정할 수 있습니다. 수정 내용은 자동 저장됩니다. </div>
+                <label class="flex items-center gap-1.5 text-[10px] text-amber-300 pt-1 select-none cursor-pointer">
+                    <input id="allow-reaim-checkbox" type="checkbox" class="accent-amber-500">
+                    <span>리에이밍(Re-aiming)</span>
+                </label>
             </div>
 
             <!-- Detailed Test Point Inspection / Inline Editor -->
-            <div class="flex-1 overflow-y-auto custom-scrollbar p-3">
-                <table class="w-full text-left text-xs border-collapse min-w-[640px]">
+            <div class="flex-1 overflow-y-auto overflow-x-auto custom-scrollbar p-3">
+                <table class="w-full text-left text-xs border-collapse min-w-[860px]">
                     <thead>
                         <tr class="border-b border-slate-800 text-[11px] text-slate-400">
                             <th class="pb-2 font-semibold">시험 포인트</th>
+                            <th class="pb-2 font-semibold text-center">유형</th>
                             <th class="pb-2 font-semibold text-center">위치 H (°)</th>
                             <th class="pb-2 font-semibold text-center">위치 V (°)</th>
                             <th class="pb-2 font-semibold text-right">MIN (cd)</th>
@@ -1123,6 +1128,190 @@
             return top + (bottom - top) * vFrac;
         }
 
+        // ============================================================
+        // Test-point measurement: single point OR 0.25° line-scan,
+        // with optional re-aiming (ΔH/ΔV) offset applied to the sample.
+        // A positive re-aim ΔH/ΔV models shifting the beam aim by that
+        // amount, which is equivalent (in the fixed screen frame) to
+        // sampling the original pattern at (h-ΔH, v-ΔV).
+        // ============================================================
+        // ============================================================
+        // Zone helpers: point-in-polygon test (ray casting) + sampling
+        // a rectangular bounding box of an arbitrary corner-defined
+        // polygon at a fine step, capped so pathological zones don't
+        // stall the browser.
+        // ============================================================
+        function pointInPolygon(h, v, corners) {
+            let inside = false;
+            for (let i = 0, j = corners.length - 1; i < corners.length; j = i++) {
+                const hi = corners[i].h, vi = corners[i].v;
+                const hj = corners[j].h, vj = corners[j].v;
+                const intersects = ((vi > v) !== (vj > v)) &&
+                    (h < (hj - hi) * (v - vi) / (vj - vi) + hi);
+                if (intersects) inside = !inside;
+            }
+            return inside;
+        }
+        function zoneBounds(corners) {
+            const hs = corners.map(c => c.h), vs = corners.map(c => c.v);
+            return { hMin: Math.min(...hs), hMax: Math.max(...hs), vMin: Math.min(...vs), vMax: Math.max(...vs) };
+        }
+        function parseZoneCornersText(text) {
+            const tokens = String(text ?? '').trim().split(/\s+/).filter(Boolean);
+            const corners = [];
+            tokens.forEach(tok => {
+                const parts = tok.split(',');
+                if (parts.length >= 2) {
+                    const h = parseFloat(parts[0]);
+                    const v = parseFloat(parts[1]);
+                    if (Number.isFinite(h) && Number.isFinite(v)) corners.push({ h, v });
+                }
+            });
+            return corners;
+        }
+        function formatZoneCornersText(corners) {
+            return (Array.isArray(corners) ? corners : []).map(c => `${c.h},${c.v}`).join(' ');
+        }
+        function defaultZoneCorners() {
+            return [{ h: -5, v: 5 }, { h: 5, v: 5 }, { h: 5, v: -5 }, { h: -5, v: -5 }];
+        }
+
+        function measureTestPoint(pt, offsetH = 0, offsetV = 0) {
+            if (pt.testType === 'line') {
+                const axis = pt.lineAxis === 'V' ? 'V' : 'H';
+                const rawStart = Number.isFinite(pt.lineStart) ? pt.lineStart : 0;
+                const rawEnd = Number.isFinite(pt.lineEnd) ? pt.lineEnd : rawStart;
+                const step = (Number.isFinite(pt.lineStep) && pt.lineStep > 0) ? pt.lineStep : 0.25;
+                const lo = Math.min(rawStart, rawEnd);
+                const hi = Math.max(rawStart, rawEnd);
+                const steps = Math.max(1, Math.round((hi - lo) / step));
+                let minCd = Infinity, maxCd = -Infinity, minPos = lo, maxPos = lo;
+                for (let i = 0; i <= steps; i++) {
+                    const pos = (i === steps) ? hi : (lo + i * step);
+                    const h = axis === 'H' ? pos : pt.h;
+                    const v = axis === 'V' ? pos : pt.v;
+                    const cd = getCandelaAt(h - offsetH, v - offsetV);
+                    if (cd < minCd) { minCd = cd; minPos = pos; }
+                    if (cd > maxCd) { maxCd = cd; maxPos = pos; }
+                }
+                if (!Number.isFinite(minCd)) minCd = 0;
+                if (!Number.isFinite(maxCd)) maxCd = 0;
+                return { kind: 'line', axis, lo, hi, step, minCd, maxCd, minPos, maxPos };
+            }
+            if (pt.testType === 'zone') {
+                const corners = (Array.isArray(pt.zoneCorners) && pt.zoneCorners.length >= 3) ? pt.zoneCorners : defaultZoneCorners();
+                const { hMin, hMax, vMin, vMax } = zoneBounds(corners);
+                let step = (Number.isFinite(pt.zoneStep) && pt.zoneStep > 0) ? pt.zoneStep : 0.25;
+                let nH = Math.max(1, Math.round((hMax - hMin) / step));
+                let nV = Math.max(1, Math.round((vMax - vMin) / step));
+                while ((nH + 1) * (nV + 1) > 12000 && step < 5) {
+                    step *= 2;
+                    nH = Math.max(1, Math.round((hMax - hMin) / step));
+                    nV = Math.max(1, Math.round((vMax - vMin) / step));
+                }
+                let minCd = Infinity, maxCd = -Infinity, minPos = null, maxPos = null, sampled = 0;
+                for (let i = 0; i <= nH; i++) {
+                    const h = (i === nH) ? hMax : (hMin + i * step);
+                    for (let j = 0; j <= nV; j++) {
+                        const v = (j === nV) ? vMax : (vMin + j * step);
+                        if (!pointInPolygon(h, v, corners)) continue;
+                        sampled++;
+                        const cd = getCandelaAt(h - offsetH, v - offsetV);
+                        if (cd < minCd) { minCd = cd; minPos = { h, v }; }
+                        if (cd > maxCd) { maxCd = cd; maxPos = { h, v }; }
+                    }
+                }
+                if (sampled === 0) {
+                    const ch = corners.reduce((a, c) => a + c.h, 0) / corners.length;
+                    const cv = corners.reduce((a, c) => a + c.v, 0) / corners.length;
+                    const cd = getCandelaAt(ch - offsetH, cv - offsetV);
+                    minCd = maxCd = cd; minPos = maxPos = { h: ch, v: cv };
+                }
+                return { kind: 'zone', corners, minCd, maxCd, minPos, maxPos };
+            }
+            const value = getCandelaAt(pt.h - offsetH, pt.v - offsetV);
+            return { kind: 'point', value };
+        }
+
+        function isMeasurementPass(measurement, minLimit, maxLimit) {
+            if (measurement.kind !== 'point') {
+                let pass = true;
+                if (minLimit !== null && minLimit > 0 && measurement.minCd < minLimit) pass = false;
+                if (maxLimit !== null && measurement.maxCd > maxLimit) pass = false;
+                return pass;
+            }
+            let pass = true;
+            if (minLimit !== null && minLimit > 0 && measurement.value < minLimit) pass = false;
+            if (maxLimit !== null && measurement.value > maxLimit) pass = false;
+            return pass;
+        }
+
+        function formatMeasurement(measurement) {
+            if (measurement.kind !== 'point') {
+                return `min ${Math.round(measurement.minCd).toLocaleString()} / max ${Math.round(measurement.maxCd).toLocaleString()}`;
+            }
+            return Math.round(measurement.value).toLocaleString();
+        }
+
+        // ============================================================
+        // Re-aiming (리에이밍): when a point/line/zone fails, probe the
+        // beam ±0.25° up/down/left/right (axis-aligned only, not
+        // diagonal) and treat it as PASS if any of the 4 positions
+        // satisfies the spec. dH/dV follow the same sign convention
+        // as state.shiftH/state.shiftV (H+ = right, V+ = up).
+        // ============================================================
+        const REAIM_STEP_DEG = 0.25;
+        const REAIM_DIRECTIONS = [
+            { key: 'up',    label: '상', dH: 0, dV: REAIM_STEP_DEG },
+            { key: 'down',  label: '하', dH: 0, dV: -REAIM_STEP_DEG },
+            { key: 'left',  label: '좌', dH: -REAIM_STEP_DEG, dV: 0 },
+            { key: 'right', label: '우', dH: REAIM_STEP_DEG, dV: 0 },
+        ];
+        function formatDirection(dir) {
+            if (!dir) return '';
+            const axisLabel = dir.dH !== 0 ? `H${dir.dH > 0 ? '+' : ''}${dir.dH}°` : `V${dir.dV > 0 ? '+' : ''}${dir.dV}°`;
+            return `${dir.label}(${axisLabel})`;
+        }
+
+        // Single source of truth for a test point's pass/fail, shared by
+        // the results table and the on-screen overlay so both always agree.
+        function evaluateTestPoint(std, pt) {
+            let minLimit = pt.min;
+            if (pt.minRef) {
+                const refPt = std.points.find(p => p.id === pt.minRef);
+                if (refPt) {
+                    const refMeasurement = measureTestPoint(refPt);
+                    const refCd = refPt.useMaxPos ? state.maxCandela : (refMeasurement.kind !== 'point' ? refMeasurement.maxCd : refMeasurement.value);
+                    minLimit = Math.round(refCd * (pt.minFactor || 1.0));
+                }
+            }
+            const maxLimit = pt.max;
+            const isPointType = pt.testType !== 'line' && pt.testType !== 'zone';
+
+            const baseMeasurement = (pt.useMaxPos && isPointType)
+                ? { kind: 'point', value: state.maxCandela }
+                : measureTestPoint(pt, 0, 0);
+
+            let isPass = isMeasurementPass(baseMeasurement, minLimit, maxLimit);
+            let displayMeasurement = baseMeasurement;
+            let reaimUsed = false;
+            let reaimDirection = null;
+
+            if (!isPass && std.allowReaim) {
+                for (const dir of REAIM_DIRECTIONS) {
+                    const m = measureTestPoint(pt, dir.dH, dir.dV);
+                    if (isMeasurementPass(m, minLimit, maxLimit)) {
+                        isPass = true;
+                        reaimUsed = true;
+                        reaimDirection = dir;
+                        displayMeasurement = m;
+                        break;
+                    }
+                }
+            }
+
+            return { pt, isPointType, minLimit, maxLimit, isPass, reaimUsed, reaimDirection, baseMeasurement, displayMeasurement };
+        }
 
         // ============================================================
         // Regulation parsing helpers
@@ -1258,18 +1447,39 @@
 
         function sanitizeRegulationLibrary(lib) {
             const out = {};
+            const toNumOrNull = (v) => (v === null || v === undefined || String(v).trim() === '') ? null : (Number.isFinite(Number(v)) ? Number(v) : null);
             Object.entries(lib || {}).forEach(([key, reg], idx) => {
                 if (!reg || !reg.name) return;
                 const points = Array.isArray(reg.points) ? reg.points : [];
                 out[key] = {
                     name: String(reg.name), cutoffType: reg.cutoffType || 'none',
-                    points: points.map((pt, pi) => ({
-                        id: pt.id || `${key}_${pi+1}`, name: String(pt.name || `Point ${pi+1}`),
-                        h: Number(pt.h) || 0, v: Number(pt.v) || 0,
-                        min: (pt.min === null || pt.min === undefined || String(pt.min).trim() === '') ? null : (Number.isFinite(Number(pt.min)) ? Number(pt.min) : null),
-                        max: (pt.max === null || pt.max === undefined || String(pt.max).trim() === '') ? null : (Number.isFinite(Number(pt.max)) ? Number(pt.max) : null),
-                        sourceRow: pt.sourceRow || null
-                    }))
+                    allowReaim: !!reg.allowReaim,
+                    meta: reg.meta || undefined,
+                    points: points.map((pt, pi) => {
+                        const testType = (pt.testType === 'line' || pt.testType === 'zone') ? pt.testType : 'point';
+                        const out_pt = {
+                            id: pt.id || `${key}_${pi+1}`, name: String(pt.name || `Point ${pi+1}`),
+                            testType,
+                            h: Number(pt.h) || 0, v: Number(pt.v) || 0,
+                            min: toNumOrNull(pt.min),
+                            max: toNumOrNull(pt.max),
+                            sourceRow: pt.sourceRow || null
+                        };
+                        if (pt.useMaxPos) out_pt.useMaxPos = true;
+                        if (testType === 'line') {
+                            out_pt.lineAxis = pt.lineAxis === 'V' ? 'V' : 'H';
+                            out_pt.lineStart = Number.isFinite(Number(pt.lineStart)) ? Number(pt.lineStart) : -5;
+                            out_pt.lineEnd = Number.isFinite(Number(pt.lineEnd)) ? Number(pt.lineEnd) : 5;
+                            out_pt.lineStep = (Number.isFinite(Number(pt.lineStep)) && Number(pt.lineStep) > 0) ? Number(pt.lineStep) : 0.25;
+                        } else if (testType === 'zone') {
+                            const corners = Array.isArray(pt.zoneCorners)
+                                ? pt.zoneCorners.map(c => ({ h: Number(c && c.h) || 0, v: Number(c && c.v) || 0 })).filter(c => Number.isFinite(c.h) && Number.isFinite(c.v))
+                                : [];
+                            out_pt.zoneCorners = corners.length >= 3 ? corners : defaultZoneCorners();
+                            out_pt.zoneStep = (Number.isFinite(Number(pt.zoneStep)) && Number(pt.zoneStep) > 0) ? Number(pt.zoneStep) : 0.25;
+                        }
+                        return out_pt;
+                    })
                 };
             });
             return out;
@@ -1360,15 +1570,49 @@
         }
         function addPoint() {
             const reg = REGULATION_STANDARDS[state.currentStandard]; if (!reg) return;
-            reg.points.push({id:`${state.currentStandard}_${Date.now()}`, name:'새 포인트', h:0, v:0, min:null, max:null});
+            reg.points.push({id:`${state.currentStandard}_${Date.now()}`, name:'새 포인트', testType:'point', h:0, v:0, lineAxis:'H', lineStart:-5, lineEnd:5, lineStep:0.25, min:null, max:null});
             saveRegulationLibrary(); renderAll();
+        }
+        function parseLineRangeText(text, fallbackLo, fallbackHi) {
+            const parts = String(text ?? '').split(/[~,\s]+/).filter(s => s !== '');
+            if (parts.length >= 2) {
+                const a = parseFloat(parts[0]);
+                const b = parseFloat(parts[1]);
+                if (Number.isFinite(a) && Number.isFinite(b)) return [a, b];
+            } else if (parts.length === 1) {
+                const a = parseFloat(parts[0]);
+                if (Number.isFinite(a)) return [a, fallbackHi];
+            }
+            return [fallbackLo, fallbackHi];
         }
         function editPoint(index, field, value) {
             const reg = REGULATION_STANDARDS[state.currentStandard]; const pt = reg?.points?.[index]; if (!pt) return;
             if (field === 'name') {
                 pt.name = String(value || '').trim() || '새 포인트';
+            } else if (field === 'testTypeAxis') {
+                if (value === 'line-h') { pt.testType = 'line'; pt.lineAxis = 'H'; }
+                else if (value === 'line-v') { pt.testType = 'line'; pt.lineAxis = 'V'; }
+                else if (value === 'zone') { pt.testType = 'zone'; }
+                else { pt.testType = 'point'; }
+                if (pt.testType === 'line') {
+                    if (!Number.isFinite(pt.lineStart) || !Number.isFinite(pt.lineEnd)) {
+                        pt.lineStart = -5; pt.lineEnd = 5;
+                    }
+                    if (!Number.isFinite(pt.lineStep) || pt.lineStep <= 0) pt.lineStep = 0.25;
+                } else if (pt.testType === 'zone') {
+                    if (!Array.isArray(pt.zoneCorners) || pt.zoneCorners.length < 3) {
+                        pt.zoneCorners = defaultZoneCorners();
+                    }
+                    if (!Number.isFinite(pt.zoneStep) || pt.zoneStep <= 0) pt.zoneStep = 0.25;
+                }
             } else if (field === 'h' || field === 'v') {
                 const n = parseFloat(value); if (Number.isFinite(n)) pt[field] = n;
+            } else if (field === 'lineRangeH' || field === 'lineRangeV') {
+                const [a, b] = parseLineRangeText(value, pt.lineStart ?? -5, pt.lineEnd ?? 5);
+                pt.lineStart = a; pt.lineEnd = b;
+            } else if (field === 'zoneCorners') {
+                const corners = parseZoneCornersText(value);
+                if (corners.length >= 3) pt.zoneCorners = corners;
             } else if (field === 'min' || field === 'max') {
                 const text = String(value ?? '').trim();
                 pt[field] = text === '' ? null : (Number.isFinite(parseFloat(text)) ? parseFloat(text) : pt[field]);
@@ -1412,56 +1656,87 @@
             const tbody = document.getElementById('test-points-tbody');
             tbody.innerHTML = '';
 
+            const reaimCheckbox = document.getElementById('allow-reaim-checkbox');
+            if (reaimCheckbox) reaimCheckbox.checked = !!std.allowReaim;
+
             let passCount = 0;
             let failCount = 0;
 
             std.points.forEach(pt => {
-                let actualCd = pt.useMaxPos ? state.maxCandela : getCandelaAt(pt.h, pt.v);
-
-                let minLimit = pt.min;
-                if (pt.minRef) {
-                    const refPt = std.points.find(p => p.id === pt.minRef);
-                    if (refPt) {
-                        const refCd = refPt.useMaxPos ? state.maxCandela : getCandelaAt(refPt.h, refPt.v);
-                        minLimit = Math.round(refCd * (pt.minFactor || 1.0));
-                    }
-                }
-
-                let maxLimit = pt.max;
-                let isPass = true;
-                let specStr = '';
-
-                if (minLimit !== null && minLimit > 0 && maxLimit !== null) {
-                    specStr = `${minLimit.toLocaleString()} ~ ${maxLimit.toLocaleString()}`;
-                    if (actualCd < minLimit || actualCd > maxLimit) isPass = false;
-                } else if (minLimit !== null && minLimit > 0) {
-                    specStr = `≥ ${minLimit.toLocaleString()}`;
-                    if (actualCd < minLimit) isPass = false;
-                } else if (maxLimit !== null) {
-                    specStr = `≤ ${maxLimit.toLocaleString()}`;
-                    if (actualCd > maxLimit) isPass = false;
-                } else {
-                    specStr = '-';
-                }
+                const isLine = pt.testType === 'line';
+                const isZone = pt.testType === 'zone';
+                const info = evaluateTestPoint(std, pt);
+                const { isPass, reaimUsed, reaimDirection, baseMeasurement, displayMeasurement } = info;
 
                 if (isPass) passCount++;
                 else failCount++;
 
+                const idx = std.points.indexOf(pt);
                 const tr = document.createElement('tr');
-                tr.className = 'hover:bg-slate-800/40 transition';
-                const inputClass = 'w-full bg-slate-900 border border-slate-700 rounded px-1.5 py-1 text-[10px] text-slate-200 focus:outline-none focus:border-blue-500';
+                tr.className = 'hover:bg-slate-800/40 transition align-top';
+                const inputClass = 'w-full bg-slate-900 border border-slate-700 rounded px-2 py-1.5 text-[11px] text-slate-200 focus:outline-none focus:border-blue-500';
+
+                const typeSelectValue = isZone ? 'zone' : (isLine ? (pt.lineAxis === 'V' ? 'line-v' : 'line-h') : 'point');
+                const typeSelectHtml = `
+                    <select class="${inputClass} text-center" data-field="testTypeAxis" data-index="${idx}">
+                        <option value="point" ${typeSelectValue === 'point' ? 'selected' : ''}>포인트</option>
+                        <option value="line-h" ${typeSelectValue === 'line-h' ? 'selected' : ''}>라인(H축)</option>
+                        <option value="line-v" ${typeSelectValue === 'line-v' ? 'selected' : ''}>라인(V축)</option>
+                        <option value="zone" ${typeSelectValue === 'zone' ? 'selected' : ''}>존(ZONE)</option>
+                    </select>`;
+
+                // Position cell(s): point → separate H/V number inputs.
+                // line → range text field on the scanning axis, fixed number on the other.
+                // zone → single wide corner-coordinate list spanning both columns.
+                let positionCellsHtml;
+                if (isZone) {
+                    positionCellsHtml = `
+                        <td class="py-1 px-1" colspan="2">
+                            <input type="text" class="${inputClass}" value="${escapeHtml(formatZoneCornersText(pt.zoneCorners))}" placeholder="H1,V1 H2,V2 H3,V3 H4,V4 ..." title="모서리 좌표 목록 — 공백으로 구분, 각 좌표는 'H,V' (° 단위), 3개 이상" data-field="zoneCorners" data-index="${idx}">
+                            <div class="text-[9px] text-slate-500 mt-0.5">모서리 좌표 (H,V) 공백구분 · 시계/반시계 순서 무관 · 3점 이상</div>
+                        </td>`;
+                } else {
+                    const hCellHtml = (isLine && pt.lineAxis === 'H')
+                        ? `<input type="text" class="${inputClass} text-center" value="${(pt.lineStart ?? -5)}~${(pt.lineEnd ?? 5)}" placeholder="시작~끝" title="H축 스캔 범위 (°), 0.25° 간격" data-field="lineRangeH" data-index="${idx}">`
+                        : `<input type="number" step="0.01" class="${inputClass} text-center" value="${Number.isFinite(pt.h) ? pt.h : 0}" data-field="h" data-index="${idx}">`;
+                    const vCellHtml = (isLine && pt.lineAxis === 'V')
+                        ? `<input type="text" class="${inputClass} text-center" value="${(pt.lineStart ?? -5)}~${(pt.lineEnd ?? 5)}" placeholder="시작~끝" title="V축 스캔 범위 (°), 0.25° 간격" data-field="lineRangeV" data-index="${idx}">`
+                        : `<input type="number" step="0.01" class="${inputClass} text-center" value="${Number.isFinite(pt.v) ? pt.v : 0}" data-field="v" data-index="${idx}">`;
+                    positionCellsHtml = `
+                        <td class="py-1 px-1 w-[120px]">${hCellHtml}</td>
+                        <td class="py-1 px-1 w-[120px]">${vCellHtml}</td>`;
+                }
+
+                const verdictLabel = isPass ? (reaimUsed ? 'PASS (Reaim)' : 'PASS') : 'FAIL';
+
+                let measuredCellHtml;
+                if (reaimUsed) {
+                    let posLabel = '';
+                    if (!isLine && !isZone && Number.isFinite(pt.h) && Number.isFinite(pt.v)) {
+                        const failHDeg = (pt.h - reaimDirection.dH).toFixed(2);
+                        const failVDeg = (pt.v - reaimDirection.dV).toFixed(2);
+                        posLabel = ` 위치(H${failHDeg}°,V${failVDeg}°)`;
+                    }
+                    measuredCellHtml = `
+                        <div class="text-rose-400/70 line-through text-[9px]">최초 ${formatMeasurement(baseMeasurement)}</div>
+                        <div class="text-emerald-400 font-bold">${formatMeasurement(displayMeasurement)}</div>
+                        <div class="text-[9px] text-amber-300">${formatDirection(reaimDirection)}${posLabel}</div>`;
+                } else {
+                    measuredCellHtml = formatMeasurement(displayMeasurement);
+                }
+
                 tr.innerHTML = `
-                    <td class="py-1 pr-1 min-w-[130px]"><input class="${inputClass} font-semibold" value="${escapeHtml(pt.name)}" data-field="name" data-index="${std.points.indexOf(pt)}"></td>
-                    <td class="py-1 px-1 w-[72px]"><input type="number" step="0.01" class="${inputClass} text-center" value="${Number.isFinite(pt.h) ? pt.h : 0}" data-field="h" data-index="${std.points.indexOf(pt)}"></td>
-                    <td class="py-1 px-1 w-[72px]"><input type="number" step="0.01" class="${inputClass} text-center" value="${Number.isFinite(pt.v) ? pt.v : 0}" data-field="v" data-index="${std.points.indexOf(pt)}"></td>
-                    <td class="py-1 px-1 w-[88px]"><input type="number" step="1" class="${inputClass} text-right" value="${pt.min ?? ''}" placeholder="없음" data-field="min" data-index="${std.points.indexOf(pt)}"></td>
-                    <td class="py-1 px-1 w-[88px]"><input type="number" step="1" class="${inputClass} text-right" value="${pt.max ?? ''}" placeholder="없음" data-field="max" data-index="${std.points.indexOf(pt)}"></td>
-                    <td class="py-2 px-1 text-right font-bold font-mono ${isPass ? 'text-slate-200' : 'text-rose-400'}">${Math.round(actualCd).toLocaleString()}</td>
-                    <td class="py-2 px-1 text-center"><span class="px-1.5 py-0.5 rounded text-[10px] font-bold ${isPass ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-rose-500/20 text-rose-400 border border-rose-500/30'}">${isPass ? 'PASS' : 'FAIL'}</span></td>
-                    <td class="py-1 px-1 text-center"><button class="delete-inline-point text-rose-300 hover:text-rose-200 px-1.5 py-1" data-index="${std.points.indexOf(pt)}" title="포인트 삭제"><i class="fa-solid fa-trash"></i></button></td>
+                    <td class="py-1 pr-1 min-w-[150px]"><input class="${inputClass} font-semibold" value="${escapeHtml(pt.name)}" data-field="name" data-index="${idx}"></td>
+                    <td class="py-1 px-1 w-[120px]">${typeSelectHtml}</td>
+                    ${positionCellsHtml}
+                    <td class="py-1 px-1 w-[96px]"><input type="number" step="1" class="${inputClass} text-right" value="${pt.min ?? ''}" placeholder="없음" data-field="min" data-index="${idx}"></td>
+                    <td class="py-1 px-1 w-[96px]"><input type="number" step="1" class="${inputClass} text-right" value="${pt.max ?? ''}" placeholder="없음" data-field="max" data-index="${idx}"></td>
+                    <td class="py-2 px-1 text-right font-bold font-mono whitespace-nowrap ${isPass ? 'text-slate-200' : 'text-rose-400'}">${measuredCellHtml}</td>
+                    <td class="py-2 px-1 text-center"><span class="px-1.5 py-0.5 rounded text-[10px] font-bold whitespace-nowrap ${isPass ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-rose-500/20 text-rose-400 border border-rose-500/30'}">${verdictLabel}</span></td>
+                    <td class="py-1 px-1 text-center"><button class="delete-inline-point text-rose-300 hover:text-rose-200 px-1.5 py-1" data-index="${idx}" title="포인트 삭제"><i class="fa-solid fa-trash"></i></button></td>
                 `;
                 tbody.appendChild(tr);
-                tr.querySelectorAll('input[data-field]').forEach(input => {
+                tr.querySelectorAll('input[data-field], select[data-field]').forEach(input => {
                     input.addEventListener('change', () => editPoint(Number(input.dataset.index), input.dataset.field, input.value));
                     input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); input.blur(); } });
                 });
@@ -2415,46 +2690,170 @@
             ctx.restore();
             }
 
-            // 6. Test Points Overlay
+            // 6. Test Points Overlay (points + line-scan segments, incl. re-aim marker)
             if (state.baseDataVisible !== false && state.showTestPoints) {
                 const std = REGULATION_STANDARDS[state.currentStandard];
-            if (!std) {
-                const tbody = document.getElementById('test-points-tbody');
-                if (tbody) tbody.innerHTML = '<tr><td colspan=5 class="py-6 text-center text-slate-500">등록된 법규가 없습니다. Excel을 업로드하거나 법규를 추가하세요.</td></tr>';
-                document.getElementById('stat-total-count').textContent = '0 개소';
-                document.getElementById('stat-pass-count').textContent = '0';
-                document.getElementById('stat-fail-count').textContent = '0';
-                return;
-            }
-                std.points.forEach(pt => {
-                    let px = degToScreenX(pt.h);
-                    let py = degToScreenY(pt.v);
+                if (std) {
+                    std.points.forEach(pt => {
+                        const info = evaluateTestPoint(std, pt);
+                        const { isPass, reaimUsed, reaimDirection, baseMeasurement, displayMeasurement } = info;
+                        const isLine = pt.testType === 'line';
+                        const isZone = pt.testType === 'zone';
+                        const passColor = 'rgba(16, 185, 129, 0.95)';
+                        const failColor = 'rgba(244, 63, 94, 0.95)';
+                        const reaimColor = 'rgba(245, 158, 11, 0.95)';
 
-                    if (pt.useMaxPos) {
-                        px = degToScreenX(state.maxH + state.shiftH);
-                        py = degToScreenY(state.maxV + state.shiftV);
-                    }
+                        if (isZone) {
+                            const corners = (Array.isArray(pt.zoneCorners) && pt.zoneCorners.length >= 3) ? pt.zoneCorners : defaultZoneCorners();
+                            const screenPts = corners.map(c => [degToScreenX(c.h), degToScreenY(c.v)]);
+                            const zoneColor = isPass ? (reaimUsed ? reaimColor : passColor) : failColor;
+                            const centroidX = screenPts.reduce((a, p) => a + p[0], 0) / screenPts.length;
+                            const centroidY = screenPts.reduce((a, p) => a + p[1], 0) / screenPts.length;
 
-                    const actualCd = pt.useMaxPos ? state.maxCandela : getCandelaAt(pt.h, pt.v);
-                    let isPass = true;
-                    if (pt.min !== null && actualCd < pt.min) isPass = false;
-                    if (pt.max !== null && actualCd > pt.max) isPass = false;
+                            ctx.save();
+                            ctx.beginPath();
+                            screenPts.forEach(([px, py], i) => i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py));
+                            ctx.closePath();
+                            ctx.fillStyle = zoneColor.replace('0.95', '0.15');
+                            ctx.fill();
+                            ctx.strokeStyle = zoneColor;
+                            ctx.lineWidth = 2.5;
+                            ctx.stroke();
+                            screenPts.forEach(([px, py]) => {
+                                ctx.beginPath();
+                                ctx.arc(px, py, 3.5, 0, 2 * Math.PI);
+                                ctx.fillStyle = zoneColor;
+                                ctx.fill();
+                            });
 
-                    ctx.beginPath();
-                    ctx.arc(px, py, 6, 0, 2 * Math.PI);
-                    ctx.fillStyle = isPass ? 'rgba(16, 185, 129, 0.95)' : 'rgba(244, 63, 94, 0.95)';
-                    ctx.fill();
-                    ctx.strokeStyle = '#ffffff';
-                    ctx.lineWidth = 1.5;
-                    ctx.stroke();
+                            if (reaimUsed) {
+                                const reaimScreenPts = corners.map(c => [degToScreenX(c.h - reaimDirection.dH), degToScreenY(c.v - reaimDirection.dV)]);
+                                ctx.setLineDash([4, 3]);
+                                ctx.strokeStyle = 'rgba(148, 163, 184, 0.6)';
+                                ctx.lineWidth = 1.2;
+                                ctx.beginPath();
+                                screenPts.forEach(([px, py], i) => i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py));
+                                ctx.closePath(); ctx.stroke();
+                                ctx.setLineDash([]);
+                                ctx.strokeStyle = reaimColor;
+                                ctx.lineWidth = 2;
+                                ctx.beginPath();
+                                reaimScreenPts.forEach(([px, py], i) => i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py));
+                                ctx.closePath(); ctx.stroke();
+                            }
 
-                    ctx.fillStyle = '#ffffff';
-                    ctx.font = 'bold 11px Inter, sans-serif';
-                    ctx.fillText(pt.name, px + 9, py - 2);
-                    ctx.font = '10px JetBrains Mono, monospace';
-                    ctx.fillStyle = isPass ? '#a7f3d0' : '#fecdd3';
-                    ctx.fillText(`${Math.round(actualCd)}cd`, px + 9, py + 10);
-                });
+                            ctx.fillStyle = '#ffffff';
+                            ctx.font = 'bold 11px Inter, sans-serif';
+                            ctx.fillText(pt.name, centroidX + 9, centroidY - 8);
+                            ctx.font = '10px JetBrains Mono, monospace';
+                            ctx.fillStyle = isPass ? '#a7f3d0' : '#fecdd3';
+                            ctx.fillText(formatMeasurement(displayMeasurement) + (reaimUsed ? ` [재조준 ${formatDirection(reaimDirection)}]` : ''), centroidX + 9, centroidY + 6);
+                            ctx.restore();
+                        } else if (isLine) {
+                            const lo = Math.min(pt.lineStart ?? -5, pt.lineEnd ?? 5);
+                            const hi = Math.max(pt.lineStart ?? -5, pt.lineEnd ?? 5);
+                            const axis = pt.lineAxis === 'V' ? 'V' : 'H';
+                            const startH = axis === 'H' ? lo : pt.h;
+                            const startV = axis === 'V' ? lo : pt.v;
+                            const endH = axis === 'H' ? hi : pt.h;
+                            const endV = axis === 'V' ? hi : pt.v;
+                            const sx = degToScreenX(startH), sy = degToScreenY(startV);
+                            const ex = degToScreenX(endH), ey = degToScreenY(endV);
+                            const midX = (sx + ex) / 2, midY = (sy + ey) / 2;
+                            const lineColor = isPass ? (reaimUsed ? reaimColor : passColor) : failColor;
+
+                            ctx.save();
+                            ctx.strokeStyle = lineColor;
+                            ctx.lineWidth = 2.5;
+                            ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(ex, ey); ctx.stroke();
+                            [[sx, sy], [ex, ey]].forEach(([px, py]) => {
+                                ctx.beginPath();
+                                ctx.arc(px, py, 4.5, 0, 2 * Math.PI);
+                                ctx.fillStyle = lineColor;
+                                ctx.fill();
+                                ctx.strokeStyle = '#ffffff';
+                                ctx.lineWidth = 1.2;
+                                ctx.stroke();
+                            });
+
+                            if (reaimUsed) {
+                                const rsx = degToScreenX(startH - reaimDirection.dH), rsy = degToScreenY(startV - reaimDirection.dV);
+                                const rex = degToScreenX(endH - reaimDirection.dH), rey = degToScreenY(endV - reaimDirection.dV);
+                                ctx.setLineDash([4, 3]);
+                                ctx.strokeStyle = 'rgba(148, 163, 184, 0.6)';
+                                ctx.lineWidth = 1.2;
+                                ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(ex, ey); ctx.stroke();
+                                ctx.setLineDash([]);
+                                ctx.strokeStyle = reaimColor;
+                                ctx.lineWidth = 2;
+                                ctx.beginPath(); ctx.moveTo(rsx, rsy); ctx.lineTo(rex, rey); ctx.stroke();
+                            }
+
+                            ctx.fillStyle = '#ffffff';
+                            ctx.font = 'bold 11px Inter, sans-serif';
+                            ctx.fillText(pt.name, midX + 9, midY - 8);
+                            ctx.font = '10px JetBrains Mono, monospace';
+                            ctx.fillStyle = isPass ? '#a7f3d0' : '#fecdd3';
+                            ctx.fillText(formatMeasurement(displayMeasurement) + (reaimUsed ? ` [재조준 ${formatDirection(reaimDirection)}]` : ''), midX + 9, midY + 6);
+                            ctx.restore();
+                        } else {
+                            let px = degToScreenX(pt.h);
+                            let py = degToScreenY(pt.v);
+                            if (pt.useMaxPos) {
+                                px = degToScreenX(state.maxH + state.shiftH);
+                                py = degToScreenY(state.maxV + state.shiftV);
+                            }
+                            const markerColor = isPass ? (reaimUsed ? reaimColor : passColor) : failColor;
+
+                            if (reaimUsed) {
+                                const rpx = degToScreenX(pt.h - reaimDirection.dH);
+                                const rpy = degToScreenY(pt.v - reaimDirection.dV);
+                                ctx.save();
+                                ctx.setLineDash([4, 3]);
+                                ctx.strokeStyle = 'rgba(148, 163, 184, 0.6)';
+                                ctx.lineWidth = 1.2;
+                                ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(rpx, rpy); ctx.stroke();
+                                ctx.setLineDash([]);
+                                ctx.restore();
+
+                                ctx.beginPath();
+                                ctx.arc(px, py, 4, 0, 2 * Math.PI);
+                                ctx.fillStyle = 'rgba(244, 63, 94, 0.5)';
+                                ctx.fill();
+
+                                ctx.beginPath();
+                                ctx.arc(rpx, rpy, 6, 0, 2 * Math.PI);
+                                ctx.fillStyle = markerColor;
+                                ctx.fill();
+                                ctx.strokeStyle = '#ffffff';
+                                ctx.lineWidth = 1.5;
+                                ctx.stroke();
+
+                                ctx.fillStyle = '#ffffff';
+                                ctx.font = 'bold 11px Inter, sans-serif';
+                                ctx.fillText(pt.name, rpx + 9, rpy - 2);
+                                ctx.font = '10px JetBrains Mono, monospace';
+                                ctx.fillStyle = '#fde68a';
+                                ctx.fillText(`${formatMeasurement(displayMeasurement)}cd [재조준 ${formatDirection(reaimDirection)}]`, rpx + 9, rpy + 10);
+                            } else {
+                                ctx.beginPath();
+                                ctx.arc(px, py, 6, 0, 2 * Math.PI);
+                                ctx.fillStyle = markerColor;
+                                ctx.fill();
+                                ctx.strokeStyle = '#ffffff';
+                                ctx.lineWidth = 1.5;
+                                ctx.stroke();
+
+                                ctx.fillStyle = '#ffffff';
+                                ctx.font = 'bold 11px Inter, sans-serif';
+                                ctx.fillText(pt.name, px + 9, py - 2);
+                                ctx.font = '10px JetBrains Mono, monospace';
+                                ctx.fillStyle = isPass ? '#a7f3d0' : '#fecdd3';
+                                ctx.fillText(`${formatMeasurement(baseMeasurement)}cd`, px + 9, py + 10);
+                            }
+                        }
+                    });
+                }
             }
 
             ctx.restore();
@@ -2836,6 +3235,11 @@
             document.getElementById('edit-regulation-btn')?.addEventListener('click', editRegulation);
             document.getElementById('delete-regulation-btn')?.addEventListener('click', deleteRegulation);
             document.getElementById('add-regulation-point-btn')?.addEventListener('click', addPoint);
+            document.getElementById('allow-reaim-checkbox')?.addEventListener('change', (e) => {
+                const std = REGULATION_STANDARDS[state.currentStandard]; if (!std) return;
+                std.allowReaim = !!e.target.checked;
+                saveRegulationLibrary(); renderAll();
+            });
             document.getElementById('add-regulation-point-inline-btn')?.addEventListener('click', addPoint);
 
             const regulationExcelInput = document.getElementById('regulation-excel-input');
