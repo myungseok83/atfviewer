@@ -91,11 +91,11 @@
             <div class="bg-slate-800 p-1 rounded-lg border border-slate-700 flex space-x-1 text-xs">
                 <button id="tab-pattern-btn" class="px-3 py-1.5 rounded-md font-semibold bg-blue-600 text-white transition flex items-center gap-1.5 shadow">
                     <i class="fa-solid fa-chart-area"></i>
-                    <span>ISO CURVE</span>
+                    <span>ISO Curve</span>
                 </button>
                 <button id="tab-matrix-btn" class="px-3 py-1.5 rounded-md font-semibold text-slate-400 hover:text-white transition flex items-center gap-1.5">
                     <i class="fa-solid fa-table-cells"></i>
-                    <span>H-V 매트릭스</span>
+                    <span>Matrix</span>
                 </button>
             </div>
 
@@ -114,14 +114,14 @@
             <!-- Import File Button -->
             <label class="cursor-pointer bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white text-xs font-medium px-3.5 py-2 rounded-lg transition-all flex items-center gap-2 shadow-md shadow-blue-600/30">
                 <i class="fa-solid fa-file-import"></i>
-                <span>ATF / LIM 스캔데이터 업로드</span>
+                <span>ATF 업로드</span>
                 <input type="file" id="atf-file-input" accept=".lim,.atf,.txt,.csv,.dat" class="hidden">
             </label>
 
             <!-- Multi-File Compare / Overlay Button -->
             <label class="cursor-pointer bg-violet-600 hover:bg-violet-500 active:bg-violet-700 text-white text-xs font-medium px-3.5 py-2 rounded-lg transition-all flex items-center gap-2 shadow-md shadow-violet-600/30">
                 <i class="fa-solid fa-layer-group"></i>
-                <span>파일 비교/중첩 (다중 선택)</span>
+                <span>파일 비교/중첩</span>
                 <input type="file" id="atf-compare-file-input" accept=".lim,.atf,.txt,.csv,.dat" class="hidden" multiple>
             </label>
         </div>
@@ -366,6 +366,10 @@
                         <div class="flex items-center gap-1.5 text-slate-300">
                             <i class="fa-solid fa-expand text-blue-400"></i>
                             <span id="screen-info-label">배광 스크린 (자동 가공 범위)</span>
+                        </div>
+                        <div class="h-3 w-px bg-slate-700"></div>
+                        <div class="text-slate-400 font-mono">
+                            FLUX: <span id="hud-total-flux" class="text-purple-300 font-semibold">-- lm</span>
                         </div>
                         <div class="h-3 w-px bg-slate-700"></div>
                         <div class="text-slate-400 font-mono">
@@ -1129,12 +1133,47 @@
         }
 
         // ============================================================
-        // Test-point measurement: single point OR 0.25° line-scan,
-        // with optional re-aiming (ΔH/ΔV) offset applied to the sample.
-        // A positive re-aim ΔH/ΔV models shifting the beam aim by that
-        // amount, which is equivalent (in the fixed screen frame) to
-        // sampling the original pattern at (h-ΔH, v-ΔV).
+        // Total luminous flux (lm) estimate: Φ = Σ I(H,V) · cos(V) · ΔH · ΔV
+        // (H,V in radians) — the standard H-V goniometer solid-angle
+        // approximation used for automotive headlamp beam patterns.
+        // Cached against the current grid so it isn't recomputed on
+        // every render/mousemove; only recalculated when the grid itself
+        // (or aiming step it depends on) changes.
         // ============================================================
+        function getTotalFlux() {
+            if (!state.grid || !state.numH || !state.numV || !state.hStep || !state.vStep) return 0;
+            if (state._fluxCacheGrid === state.grid && state._fluxCacheHStep === state.hStep &&
+                state._fluxCacheVStep === state.vStep && state._fluxCacheVMin === state.vMin &&
+                state._fluxCacheNumH === state.numH && state._fluxCacheNumV === state.numV) {
+                return state._fluxCacheValue;
+            }
+            const dHrad = state.hStep * Math.PI / 180;
+            const dVrad = state.vStep * Math.PI / 180;
+            let flux = 0;
+            for (let vIdx = 0; vIdx < state.numV; vIdx++) {
+                const vDeg = state.vMin + vIdx * state.vStep;
+                const cosV = Math.cos(vDeg * Math.PI / 180);
+                const rowOffset = vIdx * state.numH;
+                for (let hIdx = 0; hIdx < state.numH; hIdx++) {
+                    const cd = state.grid[rowOffset + hIdx];
+                    if (Number.isFinite(cd) && cd > 0) flux += cd * cosV * dHrad * dVrad;
+                }
+            }
+            state._fluxCacheGrid = state.grid;
+            state._fluxCacheHStep = state.hStep;
+            state._fluxCacheVStep = state.vStep;
+            state._fluxCacheVMin = state.vMin;
+            state._fluxCacheNumH = state.numH;
+            state._fluxCacheNumV = state.numV;
+            state._fluxCacheValue = flux;
+            return flux;
+        }
+        function updateTotalFluxHUD() {
+            const el = document.getElementById('hud-total-flux');
+            if (!el) return;
+            el.textContent = state.grid ? `${Math.round(getTotalFlux()).toLocaleString()} lm` : '-- lm';
+        }
+
         // ============================================================
         // Zone helpers: point-in-polygon test (ray casting) + sampling
         // a rectangular bounding box of an arbitrary corner-defined
@@ -2482,6 +2521,8 @@
 
             ctx.fillStyle = '#070a12';
             ctx.fillRect(0, 0, width, height);
+
+            updateTotalFluxHUD();
 
             if (!state.grid) return;
 
